@@ -23,6 +23,7 @@ These query patterns produce correct results and genuine speedup when paralleliz
 | **COUNT aggregate** | `SELECT VALUE COUNT(1) FROM c` | Each partition returns its count; sum client-side for the total |
 | **SUM aggregate** | `SELECT VALUE SUM(LENGTH(c.id)) FROM c` | Each partition returns its sum; sum client-side for the total |
 | **Existence check** | `SELECT * FROM c WHERE c.email = 'user@example.com'` | Same as point lookup — at most one partition has the result |
+| **MIN / MAX aggregate** | `SELECT VALUE MAX(c._ts) FROM c` | Each partition returns its min/max; take the min/max of those client-side |
 
 ### ❌ Bad Candidates — Do NOT Parallelize These
 
@@ -34,10 +35,9 @@ These query patterns will produce **incorrect results**, **waste RUs**, or **bot
 | **`ORDER BY`** | `SELECT * FROM c ORDER BY c.createdAt DESC` | Each partition sorts independently; combined results are **not sorted** — requires full client-side re-sort |
 | **`OFFSET...LIMIT`** | `SELECT * FROM c OFFSET 10 LIMIT 5` | Pagination semantics break completely — each partition skips/limits independently |
 | **`AVG`** | `SELECT VALUE AVG(c.price) FROM c` | Cannot sum averages — requires tracking both sum and count per partition, then dividing |
-| **`MIN` / `MAX`** | `SELECT VALUE MIN(c.createdAt) FROM c` | Requires comparing per-partition results — not incorrect, but adds complexity with minimal benefit since these are index-served |
 | **Unfiltered scan** | `SELECT * FROM c` | Same total work as sequential, but with higher peak RU burst — no speedup benefit |
 
-> **Rule of thumb**: Parallelization works when the per-partition results can be **combined without re-processing** — either concatenated (filtering queries) or summed (`COUNT`, `SUM`). If the query uses `TOP`, `ORDER BY`, `OFFSET`, or `LIMIT`, do **not** parallelize.
+> **Rule of thumb**: Parallelization works when the per-partition results can be **combined without re-processing** — either concatenated (filtering queries), summed (`COUNT`, `SUM`), or compared (`MIN`, `MAX`). If the query uses `TOP`, `ORDER BY`, `OFFSET`, or `LIMIT`, do **not** parallelize.
 
 ## What This Demo Shows
 
