@@ -4,14 +4,29 @@ Demo: Comparing Standard vs Parallelized Cross-Partition Queries in Azure Cosmos
 This demo shows the performance difference between:
 1. Standard cross-partition query (not parallelized)
 2. Parallelized cross-partition query using feed ranges
+
+The default query is a COUNT aggregation — an ideal candidate for parallelization
+because each partition can count independently and the results are summed client-side.
 """
 
 import asyncio
 import time
 import json
-from typing import List, Dict, Any, Tuple
+import re
+from typing import List, Dict, Any, Tuple, Union
 from azure.cosmos.aio import CosmosClient
 from azure.identity.aio import DefaultAzureCredential
+
+
+# Pattern to detect COUNT/SUM aggregate queries (VALUE keyword returns raw numbers)
+_AGGREGATE_PATTERN = re.compile(
+    r'\bSELECT\s+VALUE\s+(COUNT|SUM)\s*\(', re.IGNORECASE
+)
+
+
+def is_aggregate_query(query: str) -> bool:
+    """Check if the query is a COUNT or SUM aggregate that can be summed across partitions."""
+    return bool(_AGGREGATE_PATTERN.search(query))
 
 
 def load_config(config_file: str = 'config.json') -> Dict[str, Any]:
@@ -59,15 +74,18 @@ class CosmosQueryComparison:
         if isinstance(self.credential, DefaultAzureCredential):
             await self.credential.close()
     
-    async def standard_cross_partition_query(self, query: str) -> Tuple[List[Dict[str, Any]], float]:
+    async def standard_cross_partition_query(self, query: str) -> Tuple[Union[int, List[Dict[str, Any]]], float]:
         """
         Execute a standard cross-partition query (NOT parallelized).
+        
+        The SDK handles aggregation internally, querying partitions sequentially.
         
         Args:
             query: SQL query string
             
         Returns:
-            Tuple of (items, elapsed_time_seconds)
+            Tuple of (result, elapsed_time_seconds)
+            result is an int for aggregate queries, or a list of items otherwise
         """
         items = []
         start_time = time.time()
@@ -76,18 +94,30 @@ class CosmosQueryComparison:
             items.append(item)
         
         elapsed_time = time.time() - start_time
+        
+        # For aggregate queries with VALUE, the SDK returns a single scalar
+        if is_aggregate_query(query) and len(items) == 1 and isinstance(items[0], (int, float)):
+            return int(items[0]), elapsed_time
+        
         return items, elapsed_time
     
-    async def parallelized_cross_partition_query(self, query: str) -> Tuple[List[Dict[str, Any]], float]:
+    async def parallelized_cross_partition_query(self, query: str) -> Tuple[Union[int, List[Dict[str, Any]]], float]:
         """
         Execute a parallelized cross-partition query using feed ranges.
+        
+        For COUNT/SUM aggregates, each partition returns its own count/sum and
+        the results are summed client-side. For non-aggregate queries, results
+        are combined into a single list.
         
         Args:
             query: SQL query string
             
         Returns:
-            Tuple of (items, elapsed_time_seconds)
+            Tuple of (result, elapsed_time_seconds)
+            result is an int for aggregate queries, or a list of items otherwise
         """
+        aggregate = is_aggregate_query(query)
+        
         # Get all feed ranges
         feed_ranges = [feed_range async for feed_range in self.container.read_feed_ranges()]
         
@@ -105,25 +135,39 @@ class CosmosQueryComparison:
         # Execute all queries in parallel
         results = await asyncio.gather(*tasks)
         
-        # Combine results
+        elapsed_time = time.time() - start_time
+        
+        # For aggregate queries, sum the per-partition results
+        if aggregate:
+            total = 0
+            for partition_results in results:
+                for value in partition_results:
+                    if isinstance(value, (int, float)):
+                        total += int(value)
+            return total, elapsed_time
+        
+        # For non-aggregate queries, combine all items
         all_items = []
         for partition_results in results:
             all_items.extend(partition_results)
         
-        elapsed_time = time.time() - start_time
         return all_items, elapsed_time
     
-    async def compare_queries(self, query: str = 'SELECT * FROM c') -> None:
+    async def compare_queries(self, query: str = 'SELECT VALUE COUNT(1) FROM c') -> None:
         """
         Compare standard vs parallelized cross-partition query performance.
         
         Args:
             query: SQL query to execute
         """
+        aggregate = is_aggregate_query(query)
+        
         print("="*80)
         print("COSMOS DB CROSS-PARTITION QUERY COMPARISON")
         print("="*80)
         print(f"Query: {query}")
+        if aggregate:
+            print("Type:  Aggregate (COUNT/SUM) — results summed client-side")
         print("="*80)
         
         # Get feed range count
@@ -132,15 +176,21 @@ class CosmosQueryComparison:
         
         # Run standard query
         print("[1] Running STANDARD cross-partition query...")
-        standard_items, standard_time = await self.standard_cross_partition_query(query)
+        standard_result, standard_time = await self.standard_cross_partition_query(query)
         print(f"    ✓ Completed in {standard_time:.2f} seconds")
-        print(f"    ✓ Retrieved {len(standard_items)} items\n")
+        if aggregate:
+            print(f"    ✓ Result: {standard_result:,}\n")
+        else:
+            print(f"    ✓ Retrieved {len(standard_result):,} items\n")
         
         # Run parallelized query
         print("[2] Running PARALLELIZED cross-partition query...")
-        parallel_items, parallel_time = await self.parallelized_cross_partition_query(query)
+        parallel_result, parallel_time = await self.parallelized_cross_partition_query(query)
         print(f"    ✓ Completed in {parallel_time:.2f} seconds")
-        print(f"    ✓ Retrieved {len(parallel_items)} items\n")
+        if aggregate:
+            print(f"    ✓ Result: {parallel_result:,} (summed from {len(feed_ranges)} partitions)\n")
+        else:
+            print(f"    ✓ Retrieved {len(parallel_result):,} items\n")
         
         # Show comparison
         print("="*80)
@@ -155,6 +205,12 @@ class CosmosQueryComparison:
             print(f"\nSpeedup: {speedup:.2f}x faster")
             print(f"Performance improvement: {improvement:.1f}%")
         
+        if aggregate:
+            if standard_result == parallel_result:
+                print(f"\nResults match: {standard_result:,}")
+            else:
+                print(f"\nNote: results differ slightly ({standard_result:,} vs {parallel_result:,}) — expected with live data")
+        
         print("="*80)
 
 
@@ -167,7 +223,7 @@ async def main():
     endpoint = config.get('endpoint', 'https://localhost:8081')
     database_name = config.get('database', 'testdb')
     container_name = config.get('container', 'testcontainer')
-    query = config.get('query', "SELECT * FROM c WHERE c.status = 'active'")
+    query = config.get('query', 'SELECT VALUE COUNT(1) FROM c')
     use_default_credential = config.get('use_default_credential', False)
     master_key = config.get('master_key', 'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==')
     

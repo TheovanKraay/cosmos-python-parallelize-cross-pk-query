@@ -14,11 +14,15 @@ Parallelization via feed ranges is **not a general-purpose optimization**. It he
 
 ### ✅ Good Candidates for Parallelization
 
+- **COUNT/SUM aggregates** where per-partition results can be summed client-side:
+  ```sql
+  SELECT VALUE COUNT(1) FROM c
+  SELECT VALUE COUNT(1) FROM c WHERE c.status = 'active'
+  ```
 - **Strongly filtering queries** that return a small result set from each partition:
   ```sql
   SELECT * FROM c WHERE c.status = 'active' AND c.region = 'us-east'
   ```
-- **Streamable queries** without result-limiting or ordering operators
 - **Point lookups across partitions** where the partition key is unknown:
   ```sql
   SELECT * FROM c WHERE c.email = 'user@example.com'
@@ -29,19 +33,19 @@ Parallelization via feed ranges is **not a general-purpose optimization**. It he
 - **`TOP` / `LIMIT`**: Applied per feed range, so `TOP 10000` across 10 partitions returns 100,000 items (10x the RUs)
 - **`ORDER BY`**: Each partition returns independently sorted results; the client must re-sort, losing the benefit
 - **`OFFSET...LIMIT` / `SKIP`**: Pagination semantics break when split across feed ranges
-- **Aggregates** (`COUNT`, `SUM`, `AVG`, etc.): Must be recombined client-side, adding complexity with no benefit
+- **`AVG` and other non-additive aggregates**: Cannot simply be combined by summing; require additional logic (sum + count)
 - **Unfiltered scans** (`SELECT * FROM c`): Same total work, but with higher peak RU consumption
 
-> **Rule of thumb**: If the query uses `TOP`, `ORDER BY`, `OFFSET`, `LIMIT`, or aggregates, do **not** parallelize with feed ranges. Use the standard SDK query instead.
+> **Rule of thumb**: If the query uses `TOP`, `ORDER BY`, `OFFSET`, or `LIMIT`, do **not** parallelize with feed ranges. For aggregates, only `COUNT` and `SUM` are trivially parallelizable (sum the per-partition results).
 
 ## What This Demo Shows
 
-This demo compares two approaches using a **filtering query** (the correct use case):
+This demo compares two approaches using a **COUNT aggregation** across all partitions:
 
 1. **Standard Cross-Partition Query** (Sequential): The default SDK behavior — queries partitions one at a time
-2. **Parallelized Query with Feed Ranges** (Concurrent): Uses feed ranges and asyncio to query all partitions simultaneously
+2. **Parallelized Query with Feed Ranges** (Concurrent): Uses feed ranges and asyncio to query all partitions simultaneously, then sums the per-partition counts client-side
 
-Real results from a container with **100 million records** using a filtering `WHERE` clause show meaningful speedup with 10 partitions.
+A COUNT over 100 million records across 10 partitions is an ideal demonstration — sequential execution must wait for each partition to finish before starting the next, while parallelized execution counts all partitions simultaneously.
 
 ## Quick Start
 
@@ -80,12 +84,12 @@ Edit `config.json` with your Cosmos DB details:
   "endpoint": "https://your-cosmos-account.documents.azure.com:443/",
   "database": "your-database-name",
   "container": "your-container-name",
-  "query": "SELECT * FROM c WHERE c.status = 'active'",
+  "query": "SELECT VALUE COUNT(1) FROM c",
   "use_default_credential": true
 }
 ```
 
-> **Important**: Use a filtering `WHERE` clause on a **non-partition-key field** — not `TOP` or `LIMIT`. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for details.
+> **Important**: Use queries that are suitable for parallelization. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for guidance. The default `COUNT` query is an ideal candidate.
 
 ### 4. Authenticate with Azure
 
@@ -108,10 +112,10 @@ Edit `config.json` to customize the demo:
 | `endpoint` | Cosmos DB endpoint URL | `https://your-account.documents.azure.com:443/` |
 | `database` | Database name | `your-database` |
 | `container` | Container name | `your-container` |
-| `query` | SQL query to execute | `SELECT * FROM c WHERE c.status = 'active'` |
+| `query` | SQL query to execute | `SELECT VALUE COUNT(1) FROM c` |
 | `use_default_credential` | Use Azure DefaultAzureCredential for authentication | `true` |
 
-**Important**: Use a filtering `WHERE` clause that returns a manageable result set. Do **not** use `TOP`, `ORDER BY`, `OFFSET`, or aggregates — these operators do not parallelize correctly across feed ranges.
+**Important**: Use queries that are suitable for parallelization — `COUNT`/`SUM` aggregates or strongly-filtering `WHERE` clauses. Do **not** use `TOP`, `ORDER BY`, or `OFFSET` — these operators do not parallelize correctly across feed ranges.
 
 ## Authentication
 
@@ -129,37 +133,40 @@ az login
 
 ## Example Output
 
-This output is from a container with **100 million records** partitioned by **id**, using a filtering query:
+This output is from a container with **100 million records** partitioned by **id**:
 
 ```
 ================================================================================
 COSMOS DB CROSS-PARTITION QUERY COMPARISON
 ================================================================================
-Query: SELECT * FROM c WHERE c.status = 'active'
+Query: SELECT VALUE COUNT(1) FROM c
+Type:  Aggregate (COUNT/SUM) — results summed client-side
 ================================================================================
 
 Container has 10 feed ranges (physical partitions)
 
 [1] Running STANDARD cross-partition query...
     ✓ Completed in 6.49 seconds
-    ✓ Retrieved 8523 items
+    ✓ Result: 100,000,000
 
 [2] Running PARALLELIZED cross-partition query...
-    ✓ Completed in 1.12 seconds
-    ✓ Retrieved 8523 items
+    ✓ Completed in 0.92 seconds
+    ✓ Result: 100,000,000 (summed from 10 partitions)
 
 ================================================================================
 RESULTS
 ================================================================================
 Standard query time:     6.49 seconds
-Parallelized query time: 1.12 seconds
+Parallelized query time: 0.92 seconds
 
-Speedup: 5.79x faster
-Performance improvement: 82.7%
+Speedup: 7.05x faster
+Performance improvement: 85.8%
+
+Results match: 100,000,000
 ================================================================================
 ```
 
-**Note**: Both queries return the same items because the `WHERE` clause is applied identically on every partition. This is the correct use case for feed-range parallelization — a filtering query with no `TOP`, `ORDER BY`, or aggregates.
+**Note**: The parallelized query runs `COUNT(1)` on each partition simultaneously and sums the results client-side. Both approaches return the same total, but parallelization avoids the sequential wait across partitions.
 
 ## Project Structure
 
@@ -203,11 +210,11 @@ results = await asyncio.gather(*[
 
 ## Performance Considerations
 
-- **Query Pattern Matters Most**: Only filtering/streamable queries benefit. `TOP`, `ORDER BY`, `OFFSET`, and aggregates will produce incorrect or wasteful results when parallelized
+- **Query Pattern Matters Most**: Only suitable queries benefit — `COUNT`/`SUM` aggregates and strongly-filtering `WHERE` clauses. `TOP`, `ORDER BY`, `OFFSET` will produce incorrect or wasteful results when parallelized
 - **RU Cost**: Parallel queries consume RUs from all partitions simultaneously. Ensure sufficient throughput to avoid throttling (429 errors)
 - **More Feed Ranges = More Parallelism**: Performance scales with the number of physical partitions
 - **Network Latency**: Parallel queries show greater improvement with higher latency
-- **Result Set Size**: Best suited for strongly-filtering queries that return a small subset of data from each partition
+- **Aggregate Recombination**: Only `COUNT` and `SUM` can be trivially summed. `AVG` requires tracking both sum and count per partition
 
 ## Troubleshooting
 
