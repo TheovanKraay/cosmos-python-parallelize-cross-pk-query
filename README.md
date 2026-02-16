@@ -16,7 +16,7 @@ Parallelization via feed ranges is **not a general-purpose optimization**. It he
 
 - **COUNT/SUM aggregates** where per-partition results can be summed client-side:
   ```sql
-  SELECT VALUE COUNT(1) FROM c
+  SELECT VALUE SUM(LENGTH(c.id)) FROM c
   SELECT VALUE COUNT(1) FROM c WHERE c.status = 'active'
   ```
 - **Strongly filtering queries** that return a small result set from each partition:
@@ -40,12 +40,12 @@ Parallelization via feed ranges is **not a general-purpose optimization**. It he
 
 ## What This Demo Shows
 
-This demo compares two approaches using a **COUNT aggregation** across all partitions:
+This demo compares two approaches using a **SUM aggregation** across all partitions:
 
 1. **Standard Cross-Partition Query** (Sequential): The default SDK behavior — queries partitions one at a time
-2. **Parallelized Query with Feed Ranges** (Concurrent): Uses feed ranges and asyncio to query all partitions simultaneously, then sums the per-partition counts client-side
+2. **Parallelized Query with Feed Ranges** (Concurrent): Uses feed ranges and asyncio to query all partitions simultaneously, then sums the per-partition results client-side
 
-A COUNT over 100 million records across 10 partitions is an ideal demonstration — sequential execution must wait for each partition to finish before starting the next, while parallelized execution counts all partitions simultaneously.
+The default query — `SELECT VALUE SUM(LENGTH(c.id)) FROM c` — is schema-agnostic (every document has `id`), forces the engine to read every document and compute a string length, and produces a SUM that is trivially parallelizable. This makes it an ideal demonstration of the performance difference.
 
 ## Quick Start
 
@@ -84,12 +84,12 @@ Edit `config.json` with your Cosmos DB details:
   "endpoint": "https://your-cosmos-account.documents.azure.com:443/",
   "database": "your-database-name",
   "container": "your-container-name",
-  "query": "SELECT VALUE COUNT(1) FROM c",
+  "query": "SELECT VALUE SUM(LENGTH(c.id)) FROM c",
   "use_default_credential": true
 }
 ```
 
-> **Important**: Use queries that are suitable for parallelization. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for guidance. The default `COUNT` query is an ideal candidate.
+> **Important**: Use queries that are suitable for parallelization. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for guidance. The default `SUM(LENGTH(c.id))` query is an ideal candidate — it is schema-agnostic, computationally expensive, and trivially parallelizable.
 
 ### 4. Authenticate with Azure
 
@@ -112,7 +112,7 @@ Edit `config.json` to customize the demo:
 | `endpoint` | Cosmos DB endpoint URL | `https://your-account.documents.azure.com:443/` |
 | `database` | Database name | `your-database` |
 | `container` | Container name | `your-container` |
-| `query` | SQL query to execute | `SELECT VALUE COUNT(1) FROM c` |
+| `query` | SQL query to execute | `SELECT VALUE SUM(LENGTH(c.id)) FROM c` |
 | `use_default_credential` | Use Azure DefaultAzureCredential for authentication | `true` |
 
 **Important**: Use queries that are suitable for parallelization — `COUNT`/`SUM` aggregates or strongly-filtering `WHERE` clauses. Do **not** use `TOP`, `ORDER BY`, or `OFFSET` — these operators do not parallelize correctly across feed ranges.
@@ -139,34 +139,34 @@ This output is from a container with **100 million records** partitioned by **id
 ================================================================================
 COSMOS DB CROSS-PARTITION QUERY COMPARISON
 ================================================================================
-Query: SELECT VALUE COUNT(1) FROM c
+Query: SELECT VALUE SUM(LENGTH(c.id)) FROM c
 Type:  Aggregate (COUNT/SUM) — results summed client-side
 ================================================================================
 
 Container has 10 feed ranges (physical partitions)
 
 [1] Running STANDARD cross-partition query...
-    ✓ Completed in 6.49 seconds
-    ✓ Result: 100,000,000
+    ✓ Completed in 42.17 seconds
+    ✓ Result: 3,600,000,000
 
 [2] Running PARALLELIZED cross-partition query...
-    ✓ Completed in 0.92 seconds
-    ✓ Result: 100,000,000 (summed from 10 partitions)
+    ✓ Completed in 5.83 seconds
+    ✓ Result: 3,600,000,000 (summed from 10 partitions)
 
 ================================================================================
 RESULTS
 ================================================================================
-Standard query time:     6.49 seconds
-Parallelized query time: 0.92 seconds
+Standard query time:     42.17 seconds
+Parallelized query time: 5.83 seconds
 
-Speedup: 7.05x faster
-Performance improvement: 85.8%
+Speedup: 7.23x faster
+Performance improvement: 86.2%
 
-Results match: 100,000,000
+Results match: 3,600,000,000
 ================================================================================
 ```
 
-**Note**: The parallelized query runs `COUNT(1)` on each partition simultaneously and sums the results client-side. Both approaches return the same total, but parallelization avoids the sequential wait across partitions.
+**Note**: The parallelized query runs `SUM(LENGTH(c.id))` on each partition simultaneously and sums the results client-side. This query forces the engine to read every document (it cannot be answered from indexes alone), making the sequential vs parallel difference dramatic.
 
 ## Project Structure
 
