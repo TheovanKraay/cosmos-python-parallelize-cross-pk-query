@@ -167,7 +167,7 @@ async def main():
     endpoint = config.get('endpoint', 'https://localhost:8081')
     database_name = config.get('database', 'testdb')
     container_name = config.get('container', 'testcontainer')
-    query = config.get('query', "SELECT * FROM c WHERE c.partitionKey >= 'A' AND c.partitionKey < 'B'")
+    query = config.get('query', "SELECT * FROM c WHERE c.status = 'active'")
     use_default_credential = config.get('use_default_credential', False)
     master_key = config.get('master_key', 'C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==')
     

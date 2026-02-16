@@ -80,12 +80,12 @@ Edit `config.json` with your Cosmos DB details:
   "endpoint": "https://your-cosmos-account.documents.azure.com:443/",
   "database": "your-database-name",
   "container": "your-container-name",
-  "query": "SELECT * FROM c WHERE c.partitionKey >= 'A' AND c.partitionKey < 'B'",
+  "query": "SELECT * FROM c WHERE c.status = 'active'",
   "use_default_credential": true
 }
 ```
 
-> **Important**: Use a filtering `WHERE` clause — not `TOP` or `LIMIT`. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for details.
+> **Important**: Use a filtering `WHERE` clause on a **non-partition-key field** — not `TOP` or `LIMIT`. See [When to Use Parallelization](#️-when-to-use-and-not-use-parallelization) for details.
 
 ### 4. Authenticate with Azure
 
@@ -108,7 +108,7 @@ Edit `config.json` to customize the demo:
 | `endpoint` | Cosmos DB endpoint URL | `https://your-account.documents.azure.com:443/` |
 | `database` | Database name | `your-database` |
 | `container` | Container name | `your-container` |
-| `query` | SQL query to execute | `SELECT * FROM c WHERE c.partitionKey >= 'A' AND c.partitionKey < 'B'` |
+| `query` | SQL query to execute | `SELECT * FROM c WHERE c.status = 'active'` |
 | `use_default_credential` | Use Azure DefaultAzureCredential for authentication | `true` |
 
 **Important**: Use a filtering `WHERE` clause that returns a manageable result set. Do **not** use `TOP`, `ORDER BY`, `OFFSET`, or aggregates — these operators do not parallelize correctly across feed ranges.
@@ -135,7 +135,7 @@ This output is from a container with **100 million records** partitioned by **id
 ================================================================================
 COSMOS DB CROSS-PARTITION QUERY COMPARISON
 ================================================================================
-Query: SELECT * FROM c WHERE c.partitionKey >= 'A' AND c.partitionKey < 'B'
+Query: SELECT * FROM c WHERE c.status = 'active'
 ================================================================================
 
 Container has 10 feed ranges (physical partitions)
