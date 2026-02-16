@@ -1,0 +1,7 @@
+{
+  "endpoint": "https://your-cosmos-account.documents.azure.com:443/",
+  "database": "your-database-name",
+  "container": "your-container-name",
+  "query": "SELECT TOP 10000 * FROM c",
+  "use_default_credential": true
+}
