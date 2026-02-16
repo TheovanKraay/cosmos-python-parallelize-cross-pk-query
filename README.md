@@ -14,29 +14,30 @@ Parallelization via feed ranges is **not a general-purpose optimization**. It he
 
 ### ✅ Good Candidates for Parallelization
 
-- **COUNT/SUM aggregates** where per-partition results can be summed client-side:
-  ```sql
-  SELECT VALUE SUM(LENGTH(c.id)) FROM c
-  SELECT VALUE COUNT(1) FROM c WHERE c.status = 'active'
-  ```
-- **Strongly filtering queries** that return a small result set from each partition:
-  ```sql
-  SELECT * FROM c WHERE c.status = 'active' AND c.region = 'us-east'
-  ```
-- **Point lookups across partitions** where the partition key is unknown:
-  ```sql
-  SELECT * FROM c WHERE c.email = 'user@example.com'
-  ```
+These query patterns produce correct results and genuine speedup when parallelized across feed ranges:
 
-### ❌ Bad Candidates (Parallelization Will Hurt)
+| Pattern | Example | Why it works |
+|---------|---------|-------------|
+| **Point lookup (unknown PK)** | `SELECT * FROM c WHERE c.id = 'HelloWorld'` | Each partition checks independently; only the partition containing the item returns it |
+| **Strongly filtering query** | `SELECT * FROM c WHERE c.status = 'active'` | Filter applied identically per partition; results combined without duplication |
+| **COUNT aggregate** | `SELECT VALUE COUNT(1) FROM c` | Each partition returns its count; sum client-side for the total |
+| **SUM aggregate** | `SELECT VALUE SUM(LENGTH(c.id)) FROM c` | Each partition returns its sum; sum client-side for the total |
+| **Existence check** | `SELECT * FROM c WHERE c.email = 'user@example.com'` | Same as point lookup — at most one partition has the result |
 
-- **`TOP` / `LIMIT`**: Applied per feed range, so `TOP 10000` across 10 partitions returns 100,000 items (10x the RUs)
-- **`ORDER BY`**: Each partition returns independently sorted results; the client must re-sort, losing the benefit
-- **`OFFSET...LIMIT` / `SKIP`**: Pagination semantics break when split across feed ranges
-- **`AVG` and other non-additive aggregates**: Cannot simply be combined by summing; require additional logic (sum + count)
-- **Unfiltered scans** (`SELECT * FROM c`): Same total work, but with higher peak RU consumption
+### ❌ Bad Candidates — Do NOT Parallelize These
 
-> **Rule of thumb**: If the query uses `TOP`, `ORDER BY`, `OFFSET`, or `LIMIT`, do **not** parallelize with feed ranges. For aggregates, only `COUNT` and `SUM` are trivially parallelizable (sum the per-partition results).
+These query patterns will produce **incorrect results**, **waste RUs**, or **both** when parallelized:
+
+| Pattern | Example | What goes wrong |
+|---------|---------|----------------|
+| **`TOP` / `LIMIT`** | `SELECT TOP 100 * FROM c` | `TOP 100` is applied per feed range → 10 partitions return 1,000 items total, consuming 10x the RUs |
+| **`ORDER BY`** | `SELECT * FROM c ORDER BY c.createdAt DESC` | Each partition sorts independently; combined results are **not sorted** — requires full client-side re-sort |
+| **`OFFSET...LIMIT`** | `SELECT * FROM c OFFSET 10 LIMIT 5` | Pagination semantics break completely — each partition skips/limits independently |
+| **`AVG`** | `SELECT VALUE AVG(c.price) FROM c` | Cannot sum averages — requires tracking both sum and count per partition, then dividing |
+| **`MIN` / `MAX`** | `SELECT VALUE MIN(c.createdAt) FROM c` | Requires comparing per-partition results — not incorrect, but adds complexity with minimal benefit since these are index-served |
+| **Unfiltered scan** | `SELECT * FROM c` | Same total work as sequential, but with higher peak RU burst — no speedup benefit |
+
+> **Rule of thumb**: Parallelization works when the per-partition results can be **combined without re-processing** — either concatenated (filtering queries) or summed (`COUNT`, `SUM`). If the query uses `TOP`, `ORDER BY`, `OFFSET`, or `LIMIT`, do **not** parallelize.
 
 ## What This Demo Shows
 
